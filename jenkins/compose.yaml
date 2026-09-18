@@ -1,0 +1,74 @@
+name: secure-ai-jenkins
+
+services:
+  controller:
+    build:
+      context: ./controller
+    image: secure-ai-jenkins-controller:2.568.3-1
+    container_name: secure-ai-jenkins-controller
+    restart: unless-stopped
+    init: true
+
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    volumes:
+      - jenkins_home:/var/jenkins_home
+
+    networks:
+      - jenkins
+
+    security_opt:
+      - no-new-privileges:true
+
+    mem_limit: 2g
+    cpus: 2.0
+    stop_grace_period: 60s
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://localhost:8080/login >/dev/null || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  agent:
+    build:
+      context: ./agent
+    image: secure-ai-jenkins-agent:jdk21-1
+    container_name: secure-ai-jenkins-agent
+    restart: unless-stopped
+    init: true
+
+    environment:
+      JENKINS_AGENT_SSH_PUBKEY: ${JENKINS_AGENT_SSH_PUBKEY:?agent public key is required}
+
+    volumes:
+      - agent_work:/home/jenkins/agent
+      - agent_ssh:/etc/ssh
+
+    networks:
+      - jenkins
+
+    security_opt:
+      - no-new-privileges:true
+
+    mem_limit: 1536m
+    cpus: 2.0
+    stop_grace_period: 30s
+
+volumes:
+  jenkins_home:
+    name: secure-ai-jenkins-home
+
+  agent_work:
+    name: secure-ai-jenkins-agent-work
+
+  agent_ssh:
+    name: secure-ai-jenkins-agent-ssh
+
+networks:
+  jenkins:
+    name: secure-ai-jenkins-network
