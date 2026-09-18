@@ -49,11 +49,55 @@ pipeline {
                 '''
             }
         }
+
+        stage('Validate Build Credential') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'model-build-key-dev',
+                        variable: 'MODEL_BUILD_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+
+                        if [ -z "${MODEL_BUILD_KEY:-}" ]; then
+                            echo "ERROR: credential was not bound."
+                            exit 1
+                        fi
+
+                        key_length="$(printf %s "$MODEL_BUILD_KEY" | wc -c)"
+
+                        if [ "$key_length" -lt 40 ]; then
+                            echo "ERROR: credential does not meet the expected encoded-key length."
+                            exit 1
+                        fi
+
+                        echo "PASS: credential is available inside the protected block."
+                    '''
+                }
+            }
+        }
+
+        stage('Validate Credential Cleanup') {
+            steps {
+                sh '''
+                    set -eu
+
+                    if [ -n "${MODEL_BUILD_KEY:-}" ]; then
+                        echo "ERROR: credential remained available outside its scope."
+                        exit 1
+                    fi
+
+                    echo "PASS: credential is unavailable outside the protected block."
+                '''
+            }
+        }
     }
 
     post {
         success {
-            echo 'Initial Jenkins pipeline completed successfully.'
+            echo 'Secret-safe Jenkins pipeline completed successfully.'
         }
 
         failure {
