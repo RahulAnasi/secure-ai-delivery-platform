@@ -1,0 +1,7 @@
+configuration-as-code
+credentials-binding
+git
+github-branch-source
+pipeline-stage-view
+ssh-slaves
+workflow-aggregator
