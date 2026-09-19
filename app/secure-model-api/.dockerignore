@@ -1,0 +1,14 @@
+**
+
+!Dockerfile
+!.dockerignore
+!requirements.txt
+
+!src/
+!src/**
+
+!scripts/
+!scripts/encrypt_model.py
+
+**/__pycache__/
+**/*.py[cod]

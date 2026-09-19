@@ -43,3 +43,16 @@ Thumbs.db
 *.log
 tmp/
 temp/
+
+
+# Generated and proprietary model artifacts
+app/secure-model-api/.build/
+app/secure-model-api/models/
+*.enc
+*.onnx
+*.pt
+*.pth
+*.h5
+*.safetensors
+*.joblib
+*.pkl
