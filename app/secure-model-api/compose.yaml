@@ -1,0 +1,53 @@
+name: secure-model-api-local
+
+services:
+  api:
+    image: secure-model-api:dev-local
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+      secrets:
+        - model_key
+        - model_source
+
+    environment:
+      APP_ENV: dev
+      LOG_LEVEL: INFO
+      ENCRYPTED_MODEL_PATH: /app/models/model.enc
+      DECRYPTED_MODEL_PATH: /dev/shm/model.bin
+      MODEL_KEY_FILE: /run/secrets/model-key
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    secrets:
+      - source: model_key
+        target: model-key
+
+    user: "${LOCAL_UID:?LOCAL_UID must be set}:${LOCAL_GID:?LOCAL_GID must be set}"
+    read_only: true
+    init: true
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+      - /dev/shm:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=${LOCAL_UID:?LOCAL_UID must be set},gid=${LOCAL_GID:?LOCAL_GID must be set}
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    restart: unless-stopped
+    stop_grace_period: 10s
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 100
+
+secrets:
+  model_key:
+    file: ${MODEL_KEY_FILE:?MODEL_KEY_FILE must be set}
+
+  model_source:
+    file: ${MODEL_SOURCE_FILE:?MODEL_SOURCE_FILE must be set}
