@@ -3,7 +3,7 @@
 ARG PYTHON_IMAGE=python:3.13.15-slim-bookworm
 
 
-FROM ${PYTHON_IMAGE} AS builder
+FROM ${PYTHON_IMAGE} AS dependencies
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -17,6 +17,22 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install \
         --no-cache-dir \
         --requirement requirements.txt
+
+
+FROM dependencies AS test
+
+ENV PYTHONPATH=/build/src \
+    HOME=/tmp
+
+COPY src ./src
+COPY tests ./tests
+
+USER 65534:65534
+
+CMD ["/opt/venv/bin/python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+
+
+FROM dependencies AS builder
 
 COPY src ./src
 COPY scripts/encrypt_model.py ./scripts/encrypt_model.py
