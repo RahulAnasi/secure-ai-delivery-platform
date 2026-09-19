@@ -37,17 +37,25 @@ services:
   agent:
     build:
       context: ./agent
-    image: secure-ai-jenkins-agent:jdk21-1
+      args:
+        DOCKER_GID: "${DOCKER_GID:?Docker socket group ID is required}"
+
+    image: secure-ai-jenkins-agent:jdk21-docker-1
     container_name: secure-ai-jenkins-agent
     restart: unless-stopped
     init: true
 
     environment:
       JENKINS_AGENT_SSH_PUBKEY: ${JENKINS_AGENT_SSH_PUBKEY:?agent public key is required}
+      DOCKER_BUILDKIT: "1"
+
+    group_add:
+      - "${DOCKER_GID:?Docker socket group ID is required}"
 
     volumes:
       - agent_work:/home/jenkins/agent
       - agent_ssh:/etc/ssh
+      - /var/run/docker.sock:/var/run/docker.sock
 
     networks:
       - jenkins
@@ -71,4 +79,4 @@ volumes:
 
 networks:
   jenkins:
-    name: secure-ai-jenkins-network
+    name: secure-ai-jenkins-networ
