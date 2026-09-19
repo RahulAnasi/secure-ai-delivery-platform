@@ -79,4 +79,4 @@ volumes:
 
 networks:
   jenkins:
-    name: secure-ai-jenkins-networ
+    name: secure-ai-jenkins-network
