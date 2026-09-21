@@ -6,6 +6,8 @@ pipeline {
     environment {
         APP_DIR = 'app/secure-model-api'
         IMAGE_REPOSITORY = 'secure-model-api'
+        JFROG_REGISTRY = '127.0.0.1:8082'
+        JFROG_DEV_REPOSITORY = 'secure-ai-dev-local'
     }
 
     options {
@@ -38,6 +40,7 @@ pipeline {
                     docker --version
                     docker buildx version
                     docker compose version
+
                     docker info --format \
                       'Server={{.ServerVersion}} Driver={{.Driver}}'
 
@@ -54,9 +57,13 @@ pipeline {
                     test -f README.md
                     test -f .gitignore
                     test -f jenkins/compose.yaml
+                    test -f jfrog/compose.yaml
+                    test -f jfrog/.env.example
                     test -f "${APP_DIR}/Dockerfile"
                     test -f "${APP_DIR}/tests/test_crypto.py"
+
                     test ! -e jenkins/.env.agent
+                    test ! -e jfrog/.env.jfrog
 
                     git diff --check
 
@@ -79,6 +86,12 @@ pipeline {
                     env.IMAGE_REF =
                         "${env.IMAGE_REPOSITORY}:${env.GIT_SHA_SHORT}"
 
+                    env.PUBLISHED_IMAGE_REF =
+                        "${env.JFROG_REGISTRY}/" +
+                        "${env.JFROG_DEV_REPOSITORY}/" +
+                        "${env.IMAGE_REPOSITORY}:" +
+                        "${env.GIT_SHA_SHORT}"
+
                     env.SMOKE_CONTAINER =
                         "secure-model-api-ci-${env.BUILD_NUMBER}"
 
@@ -89,14 +102,15 @@ pipeline {
                         "#${env.BUILD_NUMBER} ${env.GIT_SHA_SHORT}"
 
                     currentBuild.description =
-                        "Image: ${env.IMAGE_REF}"
+                        "Artifact: ${env.PUBLISHED_IMAGE_REF}"
                 }
 
                 sh '''
                     set -eu
 
                     echo "Commit: ${GIT_SHA_SHORT}"
-                    echo "Immutable image: ${IMAGE_REF}"
+                    echo "Local image: ${IMAGE_REF}"
+                    echo "JFrog image: ${PUBLISHED_IMAGE_REF}"
                 '''
             }
         }
@@ -144,7 +158,7 @@ pipeline {
                         exit 1
                     fi
 
-                    echo "PASS: credentials are unavailable outside their scope."
+                    echo "PASS: build credentials are isolated."
                 '''
             }
         }
@@ -424,33 +438,121 @@ for path in ("/health", "/ready"):
             }
         }
 
-        stage('Final Credential Cleanup Check') {
+        stage('Publish Development Artifact') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jfrog-dev-registry',
+                        usernameVariable: 'JFROG_USERNAME',
+                        passwordVariable: 'JFROG_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        docker_config="$(mktemp -d)"
+
+                        cleanup_publish() {
+                            docker image rm -f \
+                              "${PUBLISHED_IMAGE_REF}" \
+                              >/dev/null 2>&1 || true
+
+                            rm -rf "${docker_config}"
+                        }
+
+                        trap cleanup_publish EXIT HUP INT TERM
+
+                        chmod 700 "${docker_config}"
+
+                        auth_value="$(
+                            printf '%s:%s' \
+                              "${JFROG_USERNAME}" \
+                              "${JFROG_PASSWORD}" |
+                            base64 |
+                            tr -d '\n'
+                        )"
+
+                        jq -n \
+                          --arg registry "${JFROG_REGISTRY}" \
+                          --arg auth "${auth_value}" \
+                          '{auths: {($registry): {auth: $auth}}}' \
+                          > "${docker_config}/config.json"
+
+                        chmod 600 "${docker_config}/config.json"
+
+                        docker image tag \
+                          "${IMAGE_REF}" \
+                          "${PUBLISHED_IMAGE_REF}"
+
+                        if ! push_output="$(
+                            DOCKER_CONFIG="${docker_config}" \
+                              docker push \
+                              "${PUBLISHED_IMAGE_REF}" \
+                              2>&1
+                        )"; then
+                            printf '%s\n' "${push_output}"
+                            echo "ERROR: JFrog image publication failed."
+                            exit 1
+                        fi
+
+                        printf '%s\n' "${push_output}"
+
+                        published_digest="$(
+                            printf '%s\n' "${push_output}" |
+                              sed -n \
+                                's/^.*digest: \(sha256:[0-9a-f][0-9a-f]*\).*$/\1/p' |
+                              tail -n 1
+                        )"
+
+                        if [ -z "${published_digest}" ]; then
+                            echo "ERROR: registry did not return an image digest."
+                            exit 1
+                        fi
+
+                        image_id="$(
+                            docker image inspect \
+                              --format '{{.Id}}' \
+                              "${IMAGE_REF}"
+                        )"
+
+                        {
+                            printf 'git_commit=%s\n' "${GIT_COMMIT}"
+                            printf 'git_short_sha=%s\n' "${GIT_SHA_SHORT}"
+                            printf 'jenkins_build=%s\n' "${BUILD_TAG}"
+                            printf 'local_image=%s\n' "${IMAGE_REF}"
+                            printf 'local_image_id=%s\n' "${image_id}"
+                            printf 'published_image=%s\n' "${PUBLISHED_IMAGE_REF}"
+                            printf 'published_digest=%s\n' "${published_digest}"
+                        } > artifact-metadata.txt
+
+                        echo "Local image: ${IMAGE_REF}"
+                        echo "Local image ID: ${image_id}"
+                        echo "Published image: ${PUBLISHED_IMAGE_REF}"
+                        echo "Published digest: ${published_digest}"
+                        echo "PASS: immutable development artifact published to JFrog."
+                    '''
+                }
+
+                archiveArtifacts(
+                    artifacts: 'artifact-metadata.txt',
+                    fingerprint: true,
+                    onlyIfSuccessful: true
+                )
+            }
+        }
+
+        stage('Validate Final Credential Isolation') {
             steps {
                 sh '''
                     set -eu
 
                     test -z "${MODEL_BUILD_KEY:-}"
                     test -z "${MODEL_SOURCE_FILE:-}"
+                    test -z "${JFROG_USERNAME:-}"
+                    test -z "${JFROG_PASSWORD:-}"
 
                     echo "PASS: no Jenkins credential remains bound."
-                '''
-            }
-        }
-
-        stage('Record Immutable Artifact') {
-            steps {
-                sh '''
-                    set -eu
-
-                    image_id="$(
-                        docker image inspect \
-                          --format '{{.Id}}' \
-                          "${IMAGE_REF}"
-                    )"
-
-                    echo "Image reference: ${IMAGE_REF}"
-                    echo "Image ID: ${image_id}"
-                    echo "PASS: immutable local artifact recorded."
                 '''
             }
         }
@@ -487,7 +589,7 @@ for path in ("/health", "/ready"):
         }
 
         success {
-            echo "CI completed successfully: ${env.IMAGE_REF}"
+            echo "CI completed successfully: ${env.PUBLISHED_IMAGE_REF}"
         }
 
         failure {
