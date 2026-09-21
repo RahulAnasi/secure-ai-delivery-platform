@@ -500,8 +500,7 @@ for path in ("/health", "/ready"):
 
                         published_digest="$(
                             printf '%s\n' "${push_output}" |
-                              sed -n \
-                                's/^.*digest: \(sha256:[0-9a-f][0-9a-f]*\).*$/\1/p' |
+                              awk '/digest: sha256:/ { print $3 }' |
                               tail -n 1
                         )"
 
