@@ -6,7 +6,7 @@ pipeline {
     environment {
         APP_DIR = 'app/secure-model-api'
         IMAGE_REPOSITORY = 'secure-model-api'
-        JFROG_REGISTRY = '127.0.0.1:8082'
+        JFROG_REGISTRY = '172.18.0.1:8082'
         JFROG_DEV_REPOSITORY = 'secure-ai-dev-local'
     }
 
