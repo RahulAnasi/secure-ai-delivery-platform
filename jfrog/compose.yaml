@@ -58,6 +58,7 @@ services:
       JF_SHARED_DATABASE_PASSWORD: ${ARTIFACTORY_DB_PASSWORD:?database password is required}
       JF_ROUTER_ENTRYPOINTS_EXTERNALPORT: "8082"
       JF_SHARED_EXTRAJAVAOPTS: "-Xms512m -Xmx2g"
+      JF_JFCONNECT_ENABLED: "false"
 
     ports:
       - "127.0.0.1:8081:8081"
