@@ -67,13 +67,33 @@ docker pull "$SOURCE_REF"
 
 echo "Promoting the existing artifact without rebuilding."
 docker tag "$SOURCE_REF" "$TARGET_REF"
-docker push "$TARGET_REF"
+
+if ! PUSH_OUTPUT="$(docker push "$TARGET_REF" 2>&1)"; then
+    printf '%s\n' "$PUSH_OUTPUT" >&2
+    echo "ERROR: artifact push failed." >&2
+    exit 1
+fi
+
+printf '%s\n' "$PUSH_OUTPUT"
 
 ACTUAL_DIGEST="$(
-    docker buildx imagetools inspect "$TARGET_REF" |
-        awk '$1 == "Digest:" {print $2; found=1; exit}
-             END {if (!found) exit 1}'
+    printf '%s\n' "$PUSH_OUTPUT" |
+        awk '
+            /digest:[[:space:]]+sha256:[0-9a-f]+/ {
+                for (field = 1; field <= NF; field++) {
+                    if ($field == "digest:") {
+                        print $(field + 1)
+                        exit
+                    }
+                }
+            }
+        '
 )"
+
+if [[ -z "$ACTUAL_DIGEST" ]]; then
+    echo "ERROR: registry did not return a published digest." >&2
+    exit 1
+fi
 
 if [[ "$ACTUAL_DIGEST" != "$EXPECTED_DIGEST" ]]; then
     echo "ERROR: promoted digest does not match the approved source digest." >&2

@@ -70,19 +70,25 @@ pipeline {
 
             steps {
                 script {
-                    if (!(params.SOURCE_TAG ==~ /^[0-9a-f]{12}$/)) {
+                    def sourceTag = params.SOURCE_TAG.trim()
+                    def sourceDigest = params.SOURCE_DIGEST.trim()
+
+                    if (!(sourceTag ==~ /^[0-9a-f]{12}$/)) {
                         error('SOURCE_TAG must contain exactly 12 lowercase hexadecimal characters.')
                     }
 
-                    if (!(params.SOURCE_DIGEST ==~ /^sha256:[0-9a-f]{64}$/)) {
+                    if (!(sourceDigest ==~ /^sha256:[0-9a-f]{64}$/)) {
                         error('SOURCE_DIGEST must be a valid SHA-256 digest.')
                     }
 
+                    env.APPROVED_SOURCE_TAG = sourceTag
+                    env.APPROVED_SOURCE_DIGEST = sourceDigest
+
                     if (params.RELEASE_ACTION == 'ROLLBACK') {
                         env.PROMOTION_TAG =
-                            "rollback-${params.SOURCE_TAG}-${env.BUILD_NUMBER}"
+                            "rollback-${sourceTag}-${env.BUILD_NUMBER}"
                     } else {
-                        env.PROMOTION_TAG = params.SOURCE_TAG
+                        env.PROMOTION_TAG = sourceTag
                     }
 
                     currentBuild.displayName =
@@ -92,8 +98,8 @@ pipeline {
                 }
 
                 echo "Action: ${params.RELEASE_ACTION}"
-                echo "Source tag: ${params.SOURCE_TAG}"
-                echo "Approved digest: ${params.SOURCE_DIGEST}"
+                echo "Source tag: ${env.APPROVED_SOURCE_TAG}"
+                echo "Approved digest: ${env.APPROVED_SOURCE_DIGEST}"
                 echo "Promotion tag: ${env.PROMOTION_TAG}"
             }
         }
@@ -119,7 +125,7 @@ pipeline {
                             "$TEST_REPOSITORY" \
                             "$IMAGE_NAME" \
                             "$PROMOTION_TAG" \
-                            "$SOURCE_DIGEST"
+                            "$APPROVED_SOURCE_DIGEST"
                     '''
                 }
             }
@@ -142,7 +148,7 @@ pipeline {
                         set +x
                         set -eu
 
-                        TEST_REF="${JFROG_REGISTRY}/${TEST_REPOSITORY}/${IMAGE_NAME}@${SOURCE_DIGEST}"
+                        TEST_REF="${JFROG_REGISTRY}/${TEST_REPOSITORY}/${IMAGE_NAME}@${APPROVED_SOURCE_DIGEST}"
 
                         cleanup() {
                             docker logout "$JFROG_REGISTRY" >/dev/null 2>&1 || true
@@ -157,13 +163,16 @@ pipeline {
 
                         docker pull "$TEST_REF"
 
-                        ACTUAL_DIGEST="$(
-                            docker buildx imagetools inspect "$TEST_REF" |
-                                awk '$1 == "Digest:" {print $2; found=1; exit}
-                                     END {if (!found) exit 1}'
+                        REPOSITORY_DIGESTS="$(
+                            docker image inspect \
+                                --format '{{json .RepoDigests}}' \
+                                "$TEST_REF"
                         )"
 
-                        test "$ACTUAL_DIGEST" = "$SOURCE_DIGEST"
+                        printf 'Repository digests: %s\n' "$REPOSITORY_DIGESTS"
+
+                        printf '%s\n' "$REPOSITORY_DIGESTS" |
+                            grep -Fq "@${APPROVED_SOURCE_DIGEST}"
 
                         test "$(
                             docker image inspect \
@@ -219,7 +228,7 @@ pipeline {
                             "$PROD_REPOSITORY" \
                             "$IMAGE_NAME" \
                             "$PROMOTION_TAG" \
-                            "$SOURCE_DIGEST"
+                            "$APPROVED_SOURCE_DIGEST"
                     '''
                 }
             }
@@ -242,7 +251,7 @@ pipeline {
                         set +x
                         set -eu
 
-                        PROD_REF="${JFROG_REGISTRY}/${PROD_REPOSITORY}/${IMAGE_NAME}:${PROMOTION_TAG}"
+                        PROD_REF="${JFROG_REGISTRY}/${PROD_REPOSITORY}/${IMAGE_NAME}@${APPROVED_SOURCE_DIGEST}"
 
                         cleanup() {
                             docker logout "$JFROG_REGISTRY" >/dev/null 2>&1 || true
@@ -255,16 +264,18 @@ pipeline {
                                 --username "$JFROG_USERNAME" \
                                 --password-stdin
 
-                        ACTUAL_DIGEST="$(
-                            docker buildx imagetools inspect "$PROD_REF" |
-                                awk '$1 == "Digest:" {print $2; found=1; exit}
-                                     END {if (!found) exit 1}'
+                        docker pull "$PROD_REF"
+
+                        REPOSITORY_DIGESTS="$(
+                            docker image inspect \
+                                --format '{{json .RepoDigests}}' \
+                                "$PROD_REF"
                         )"
 
-                        test "$ACTUAL_DIGEST" = "$SOURCE_DIGEST"
+                        printf 'Repository digests: %s\n' "$REPOSITORY_DIGESTS"
 
-                        docker pull \
-                            "${JFROG_REGISTRY}/${PROD_REPOSITORY}/${IMAGE_NAME}@${SOURCE_DIGEST}"
+                        printf '%s\n' "$REPOSITORY_DIGESTS" |
+                            grep -Fq "@${APPROVED_SOURCE_DIGEST}"
 
                         echo "PASS: production contains the approved immutable digest."
                     '''
@@ -283,9 +294,9 @@ pipeline {
 
                     jq --null-input \
                         --arg action "$RELEASE_ACTION" \
-                        --arg sourceTag "$SOURCE_TAG" \
+                        --arg sourceTag "$APPROVED_SOURCE_TAG" \
                         --arg promotionTag "$PROMOTION_TAG" \
-                        --arg digest "$SOURCE_DIGEST" \
+                        --arg digest "$APPROVED_SOURCE_DIGEST" \
                         --arg buildUrl "$BUILD_URL" \
                         '{
                             action: $action,
@@ -310,7 +321,7 @@ pipeline {
 
     post {
         success {
-            echo "Release completed successfully: ${env.PROMOTION_TAG}@${params.SOURCE_DIGEST}"
+            echo "Release completed successfully: ${env.PROMOTION_TAG}@${env.APPROVED_SOURCE_DIGEST}"
         }
 
         aborted {
