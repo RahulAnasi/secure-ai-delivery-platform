@@ -121,7 +121,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - wget --quiet --output-document=- http://127.0.0.1:8083/artifactory/api/system/ping | grep --quiet '^OK$'
+        - wget -q --output-document=- http://127.0.0.1:8083/artifactory/api/system/ping | grep -q '^OK$'
       interval: 15s
       timeout: 5s
       retries: 10
