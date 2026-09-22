@@ -1,0 +1,145 @@
+name: secure-ai-jfrog
+
+services:
+  postgres:
+    image: postgres:16-bookworm@sha256:efdf07c2f9d4df592783dcc8ea5f6db02efbf5f6452b527225ff5e58364570e9
+    container_name: secure-ai-jfrog-postgres
+    restart: unless-stopped
+    init: true
+
+    environment:
+      POSTGRES_DB: ${ARTIFACTORY_DB_NAME:?database name is required}
+      POSTGRES_USER: ${ARTIFACTORY_DB_USER:?database user is required}
+      POSTGRES_PASSWORD: ${ARTIFACTORY_DB_PASSWORD:?database password is required}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - jfrog
+
+    security_opt:
+      - no-new-privileges:true
+
+    mem_limit: 768m
+    cpus: 1.0
+    stop_grace_period: 60s
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready --username="$${POSTGRES_USER}" --dbname="$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  artifactory:
+    image: releases-docker.jfrog.io/jfrog/artifactory-jcr@sha256:c9abe47eeea76847b5806e54d1b733389c92f4f55a6a6b700864959c3ce7489a
+    container_name: secure-ai-jfrog-artifactory
+    restart: unless-stopped
+    init: true
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      JF_SHARED_DATABASE_TYPE: postgresql
+      JF_SHARED_DATABASE_DRIVER: org.postgresql.Driver
+      JF_SHARED_DATABASE_URL: jdbc:postgresql://postgres:5432/${ARTIFACTORY_DB_NAME:?database name is required}
+      JF_SHARED_DATABASE_USERNAME: ${ARTIFACTORY_DB_USER:?database user is required}
+      JF_SHARED_DATABASE_PASSWORD: ${ARTIFACTORY_DB_PASSWORD:?database password is required}
+      JF_ROUTER_ENTRYPOINTS_EXTERNALPORT: "8082"
+      JF_SHARED_EXTRAJAVAOPTS: "-Xms512m -Xmx2g"
+      JF_JFCONNECT_ENABLED: "false"
+
+    ports:
+      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:8082:8082"
+
+    volumes:
+      - artifactory_data:/var/opt/jfrog/artifactory
+
+    networks:
+      - jfrog
+
+    security_opt:
+      - no-new-privileges:true
+
+    mem_limit: 5g
+    cpus: 4.0
+    stop_grace_period: 120s
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail --silent http://127.0.0.1:8081/artifactory/api/system/ping | grep --quiet '^OK$'
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  registry-proxy:
+    image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+    container_name: secure-ai-jfrog-registry-proxy
+    restart: unless-stopped
+    init: true
+
+    depends_on:
+      artifactory:
+        condition: service_healthy
+
+    ports:
+      - "172.18.0.1:8083:8083"
+
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+    networks:
+      - jfrog
+
+    security_opt:
+      - no-new-privileges:true
+
+    mem_limit: 128m
+    cpus: 0.25
+    stop_grace_period: 20s
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --quiet --output-document=- http://127.0.0.1:8083/artifactory/api/system/ping | grep --quiet '^OK$'
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+    name: secure-ai-jfrog-postgres-data
+
+  artifactory_data:
+    name: secure-ai-jfrog-artifactory-data
+
+networks:
+  jfrog:
+    name: secure-ai-jfrog-network
