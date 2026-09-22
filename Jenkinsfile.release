@@ -1,0 +1,335 @@
+pipeline {
+    agent none
+
+    parameters {
+        choice(
+            name: 'RELEASE_ACTION',
+            choices: ['PROMOTE', 'ROLLBACK'],
+            description: 'Promote a new artifact or restore a known-good digest.'
+        )
+
+        string(
+            name: 'SOURCE_TAG',
+            defaultValue: 'aa2a23305953',
+            description: 'Immutable Git-SHA tag from the development repository.',
+            trim: true
+        )
+
+        string(
+            name: 'SOURCE_DIGEST',
+            defaultValue: 'sha256:8671dd88afc1e13bbb009bfc0129a4acf3cbb4566f11afbd02413699f71b5286',
+            description: 'Approved SHA-256 digest from the development repository.',
+            trim: true
+        )
+    }
+
+    environment {
+        JFROG_REGISTRY = '172.18.0.1:8083'
+        DEV_REPOSITORY = 'secure-ai-dev-local'
+        TEST_REPOSITORY = 'secure-ai-test-local'
+        PROD_REPOSITORY = 'secure-ai-prod-local'
+        IMAGE_NAME = 'secure-model-api'
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timestamps()
+    }
+
+    stages {
+        stage('Checkout') {
+            agent {
+                label 'linux'
+            }
+
+            steps {
+                deleteDir()
+                checkout scm
+
+                sh '''
+                    set -eu
+
+                    test -f Jenkinsfile.release
+                    test -x scripts/promote-image.sh
+
+                    bash -n scripts/promote-image.sh
+                    git diff --check
+
+                    echo "PASS: release pipeline files are valid."
+                '''
+            }
+        }
+
+        stage('Validate Release Request') {
+            agent {
+                label 'linux'
+            }
+
+            steps {
+                script {
+                    def sourceTag = params.SOURCE_TAG.trim()
+                    def sourceDigest = params.SOURCE_DIGEST.trim()
+
+                    if (!(sourceTag ==~ /^[0-9a-f]{12}$/)) {
+                        error('SOURCE_TAG must contain exactly 12 lowercase hexadecimal characters.')
+                    }
+
+                    if (!(sourceDigest ==~ /^sha256:[0-9a-f]{64}$/)) {
+                        error('SOURCE_DIGEST must be a valid SHA-256 digest.')
+                    }
+
+                    env.APPROVED_SOURCE_TAG = sourceTag
+                    env.APPROVED_SOURCE_DIGEST = sourceDigest
+
+                    if (params.RELEASE_ACTION == 'ROLLBACK') {
+                        env.PROMOTION_TAG =
+                            "rollback-${sourceTag}-${env.BUILD_NUMBER}"
+                    } else {
+                        env.PROMOTION_TAG = sourceTag
+                    }
+
+                    currentBuild.displayName =
+                        "#${env.BUILD_NUMBER} " +
+                        "${params.RELEASE_ACTION.toLowerCase()} " +
+                        "${env.PROMOTION_TAG}"
+                }
+
+                echo "Action: ${params.RELEASE_ACTION}"
+                echo "Source tag: ${env.APPROVED_SOURCE_TAG}"
+                echo "Approved digest: ${env.APPROVED_SOURCE_DIGEST}"
+                echo "Promotion tag: ${env.PROMOTION_TAG}"
+            }
+        }
+
+        stage('Promote Development to Test') {
+            agent {
+                label 'linux'
+            }
+
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jfrog-release-registry',
+                        usernameVariable: 'JFROG_USERNAME',
+                        passwordVariable: 'JFROG_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+
+                        scripts/promote-image.sh \
+                            "$DEV_REPOSITORY" \
+                            "$TEST_REPOSITORY" \
+                            "$IMAGE_NAME" \
+                            "$PROMOTION_TAG" \
+                            "$APPROVED_SOURCE_DIGEST"
+                    '''
+                }
+            }
+        }
+
+        stage('Validate Test Artifact') {
+            agent {
+                label 'linux'
+            }
+
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jfrog-release-registry',
+                        usernameVariable: 'JFROG_USERNAME',
+                        passwordVariable: 'JFROG_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        TEST_REF="${JFROG_REGISTRY}/${TEST_REPOSITORY}/${IMAGE_NAME}@${APPROVED_SOURCE_DIGEST}"
+
+                        cleanup() {
+                            docker logout "$JFROG_REGISTRY" >/dev/null 2>&1 || true
+                        }
+
+                        trap cleanup EXIT
+
+                        printf '%s' "$JFROG_PASSWORD" |
+                            docker login "$JFROG_REGISTRY" \
+                                --username "$JFROG_USERNAME" \
+                                --password-stdin
+
+                        docker pull "$TEST_REF"
+
+                        REPOSITORY_DIGESTS="$(
+                            docker image inspect \
+                                --format '{{json .RepoDigests}}' \
+                                "$TEST_REF"
+                        )"
+
+                        printf 'Repository digests: %s\n' "$REPOSITORY_DIGESTS"
+
+                        printf '%s\n' "$REPOSITORY_DIGESTS" |
+                            grep -Fq "@${APPROVED_SOURCE_DIGEST}"
+
+                        test "$(
+                            docker image inspect \
+                                --format '{{.Config.User}}' \
+                                "$TEST_REF"
+                        )" = "10001:10001"
+
+                        test "$(
+                            docker image inspect \
+                                --format '{{json .Config.Healthcheck}}' \
+                                "$TEST_REF"
+                        )" != "null"
+
+                        echo "PASS: test artifact digest and hardening controls are valid."
+                    '''
+                }
+            }
+        }
+
+        stage('Production Approval') {
+            options {
+                timeout(time: 15, unit: 'MINUTES')
+            }
+
+            input {
+                message 'The test artifact passed validation. Promote this exact digest to production?'
+                ok 'Promote approved artifact'
+            }
+
+            steps {
+                echo "Production promotion approved for ${env.PROMOTION_TAG}."
+            }
+        }
+
+        stage('Promote Test to Production') {
+            agent {
+                label 'linux'
+            }
+
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jfrog-release-registry',
+                        usernameVariable: 'JFROG_USERNAME',
+                        passwordVariable: 'JFROG_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+
+                        scripts/promote-image.sh \
+                            "$TEST_REPOSITORY" \
+                            "$PROD_REPOSITORY" \
+                            "$IMAGE_NAME" \
+                            "$PROMOTION_TAG" \
+                            "$APPROVED_SOURCE_DIGEST"
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Production Artifact') {
+            agent {
+                label 'linux'
+            }
+
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'jfrog-release-registry',
+                        usernameVariable: 'JFROG_USERNAME',
+                        passwordVariable: 'JFROG_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        PROD_REF="${JFROG_REGISTRY}/${PROD_REPOSITORY}/${IMAGE_NAME}@${APPROVED_SOURCE_DIGEST}"
+
+                        cleanup() {
+                            docker logout "$JFROG_REGISTRY" >/dev/null 2>&1 || true
+                        }
+
+                        trap cleanup EXIT
+
+                        printf '%s' "$JFROG_PASSWORD" |
+                            docker login "$JFROG_REGISTRY" \
+                                --username "$JFROG_USERNAME" \
+                                --password-stdin
+
+                        docker pull "$PROD_REF"
+
+                        REPOSITORY_DIGESTS="$(
+                            docker image inspect \
+                                --format '{{json .RepoDigests}}' \
+                                "$PROD_REF"
+                        )"
+
+                        printf 'Repository digests: %s\n' "$REPOSITORY_DIGESTS"
+
+                        printf '%s\n' "$REPOSITORY_DIGESTS" |
+                            grep -Fq "@${APPROVED_SOURCE_DIGEST}"
+
+                        echo "PASS: production contains the approved immutable digest."
+                    '''
+                }
+            }
+        }
+
+        stage('Record Release') {
+            agent {
+                label 'linux'
+            }
+
+            steps {
+                sh '''
+                    set -eu
+
+                    jq --null-input \
+                        --arg action "$RELEASE_ACTION" \
+                        --arg sourceTag "$APPROVED_SOURCE_TAG" \
+                        --arg promotionTag "$PROMOTION_TAG" \
+                        --arg digest "$APPROVED_SOURCE_DIGEST" \
+                        --arg buildUrl "$BUILD_URL" \
+                        '{
+                            action: $action,
+                            sourceTag: $sourceTag,
+                            promotionTag: $promotionTag,
+                            digest: $digest,
+                            buildUrl: $buildUrl
+                        }' \
+                        > release-metadata.json
+
+                    jq . release-metadata.json
+                '''
+
+                archiveArtifacts(
+                    artifacts: 'release-metadata.json',
+                    fingerprint: true,
+                    onlyIfSuccessful: true
+                )
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Release completed successfully: ${env.PROMOTION_TAG}@${env.APPROVED_SOURCE_DIGEST}"
+        }
+
+        aborted {
+            echo 'Release was stopped or production approval was rejected.'
+        }
+
+        failure {
+            echo 'Release failed. No later environment should be promoted.'
+        }
+    }
+}
