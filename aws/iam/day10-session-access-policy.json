@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StartSessionOnDevelopmentServer",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": [
+        "arn:aws:ec2:ap-south-1:884596874125:instance/i-06351ac1f906a192d",
+        "arn:aws:ssm:ap-south-1::document/AWS-StartInteractiveCommand"
+      ]
+    },
+    {
+      "Sid": "ManageOwnSession",
+      "Effect": "Allow",
+      "Action": [
+        "ssmmessages:OpenDataChannel",
+        "ssm:ResumeSession",
+        "ssm:TerminateSession"
+      ],
+      "Resource": [
+        "arn:aws:ssm:ap-south-1:884596874125:session/${aws:userid}-*",
+        "arn:aws:ssm:ap-south-1:884596874125:session/${aws:username}-*"
+      ]
+    }
+  ]
+}
