@@ -47,3 +47,18 @@ output "ami_id" {
   description = "Amazon Linux image used by the development server."
   value       = data.aws_ami.amazon_linux.id
 }
+
+output "delivery_bucket_name" {
+  description = "Private bucket used to deliver application artifacts."
+  value       = aws_s3_bucket.delivery.id
+}
+
+output "artifact_object_key" {
+  description = "Exact object key allowed for the selected artifact."
+  value       = local.artifact_object_key
+}
+
+output "runtime_secret_arn" {
+  description = "Existing secret whose value the EC2 role may retrieve."
+  value       = data.aws_secretsmanager_secret.model_key.arn
+}
