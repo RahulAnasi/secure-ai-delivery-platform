@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "image_id": "sha256:8f19e7942102ca96ad506dd0147582471fc83ea7a7222788378c09ce218c73b5",
+  "source_label": "secure-model-api:dev-local",
+  "archive_name": "secure-model-api.tar.gz",
+  "archive_sha256": "75f93b0280ebc19c8fc60565b6b610fed07a1b70997db9e5781685475c041fd8",
+  "archive_bytes": 58381881,
+  "aws_region": "ap-south-1",
+  "runtime_secret_id": "secure-ai/day9/model-key",
+  "runtime_image_id": "sha256:f4ad4cbaca59d27820e44f49c0836f0395b337290bb45878df52bee423da1b75",
+  "runtime_platform": "linux/amd64"
+}

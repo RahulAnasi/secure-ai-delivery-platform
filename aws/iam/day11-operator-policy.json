@@ -1,0 +1,53 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageDevelopmentDeliveryBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:ListBucket",
+        "s3:GetBucket*",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:PutBucketTagging",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:GetAccelerateConfiguration"
+      ],
+      "Resource": "arn:aws:s3:::secure-ai-delivery-884596874125-ap-south-1-dev"
+    },
+    {
+      "Sid": "ManageDevelopmentArtifactObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::secure-ai-delivery-884596874125-ap-south-1-dev/artifacts/*"
+    },
+    {
+      "Sid": "ManageDevelopmentRoleInlinePolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::884596874125:role/secure-ai-dev-ec2-role"
+    },
+    {
+      "Sid": "ReadModelSecretResourcePolicy",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetResourcePolicy",
+      "Resource": "arn:aws:secretsmanager:ap-south-1:884596874125:secret:secure-ai/day9/model-key-nButbv"
+    }
+  ]
+}
