@@ -2,19 +2,26 @@
 # Run on EC2 with a directory containing the approved deployment files.
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 DEPLOYMENT_PACKAGE_DIRECTORY" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+    echo "Usage: $0 DEPLOYMENT_PACKAGE_DIRECTORY [--simulate-start-failure]" >&2
     exit 64
 fi
 
-python3 - "$1" <<'PY'
+# Serialize deployments on this host. The lock is released when this process exits.
+exec 9>/run/lock/secure-model-api-deploy.lock
+flock -n 9 || { echo "STOP: another deployment holds the lock." >&2; exit 1; }
+
+python3 - "$@" <<'PY'
 import hashlib
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 
@@ -29,8 +36,46 @@ def require(condition, message):
         raise RuntimeError(message)
     print("PASS:", message, flush=True)
 
+SERVICE = "secure-model-api.service"
+LAUNCHER = Path("/usr/local/libexec/secure-model-api-run")
+UNIT = Path("/etc/systemd/system/secure-model-api.service")
+snapshot = None
+previous_image = None
+mutation_started = False
+
+def wait_for_health():
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        probe = subprocess.run(
+            ["docker", "inspect", "--format",
+             "{{if .State.Health}}{{.State.Health.Status}}{{end}}",
+             "secure-model-api"], text=True, capture_output=True,
+        )
+        if probe.returncode == 0 and probe.stdout.strip() == "healthy":
+            return
+        if output("systemctl", "show", SERVICE, "--property=ActiveState", "--value") == "failed":
+            raise RuntimeError("application service entered failed state")
+        time.sleep(2)
+    raise RuntimeError("application did not become healthy within two minutes")
+
+def file_hash(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def restore_file(source, destination):
+    # The preflight below requires root-owned regular files.
+    temporary = destination.with_name(destination.name + ".rollback-tmp")
+    try:
+        shutil.copy2(source, temporary)
+        os.chown(temporary, 0, 0)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
 try:
     require(os.geteuid() == 0, "deployment runs as root")
+    require(len(sys.argv) == 2 or sys.argv[2] == "--simulate-start-failure",
+            "supported deployment mode")
+    simulate_failure = len(sys.argv) == 3
 
     package = Path(sys.argv[1]).resolve()
     manifest = json.loads((package / "artifact.json").read_text())
@@ -71,6 +116,24 @@ try:
     require(role.startswith(
         "arn:aws:sts::884596874125:assumed-role/secure-ai-dev-ec2-role/"
     ), "expected EC2 runtime role")
+
+    # Refuse to replace an unhealthy deployment: rollback needs a verified baseline.
+    require(output("systemctl", "show", SERVICE, "--property=FragmentPath", "--value")
+            == str(UNIT), "expected systemd unit file")
+    require(output("systemctl", "show", SERVICE, "--property=DropInPaths", "--value")
+            == "", "no unsupported systemd drop-in overrides")
+    for path in (LAUNCHER, UNIT):
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0,
+                "root-owned regular rollback file: " + path.name)
+    previous_image = output("docker", "inspect", "--format", "{{.Image}}",
+                            "secure-model-api")
+    require(re.fullmatch(r"sha256:[0-9a-f]{64}", previous_image) is not None,
+            "valid previous runtime image ID")
+    require('image_id="' + previous_image + '"' in LAUNCHER.read_text(),
+            "installed launcher matches running image")
+    run("bash", str(verifier), previous_image)
+    print("PASS: existing deployment is a verified rollback baseline.", flush=True)
 
     bucket = "secure-ai-delivery-884596874125-ap-south-1-dev"
     object_key = (
@@ -127,29 +190,73 @@ try:
     require(loaded["RootFS"]["Layers"] == config["rootfs"]["diff_ids"],
             "loaded image layers match archive configuration")
 
+    # Save only non-secret configuration. Never copy /run or the model key.
+    rollback_root = Path("/opt/secure-model-api/rollback")
+    rollback_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    require(rollback_root.lstat().st_uid == 0 and not rollback_root.is_symlink(),
+            "root-owned rollback directory")
+    rollback_root.chmod(0o700)
+    snapshot = Path(tempfile.mkdtemp(prefix="deployment-", dir=rollback_root))
+    shutil.copy2(LAUNCHER, snapshot / "launcher")
+    shutil.copy2(UNIT, snapshot / "service")
+    shutil.copy2(verifier, snapshot / "verify-runtime.sh")
+    record = {
+        "previous_image_id": previous_image,
+        "candidate_image_id": expected_image,
+        "launcher_sha256": file_hash(LAUNCHER),
+        "service_sha256": file_hash(UNIT),
+        "status": "baseline-saved",
+    }
+    def save_record(status):
+        record["status"] = status
+        (snapshot / "result.json").write_text(json.dumps(record, indent=2) + "\n")
+    save_record("baseline-saved")
+    print("Rollback snapshot:", snapshot, flush=True)
+
     print("Configuring and restarting application service.", flush=True)
+    mutation_started = True
     run("bash", str(setup))
+    if simulate_failure:
+        # An explicit lab mode: fail before fetching a secret or starting Docker.
+        LAUNCHER.write_text("#!/bin/bash\necho 'Intentional Day 14 startup failure.' >&2\nexit 23\n")
+        LAUNCHER.chmod(0o755)
+        print("TEST: installed deliberately failing candidate launcher.", flush=True)
     run("systemctl", "enable", "docker.service")
     run("systemctl", "enable", "secure-model-api.service")
+    run("systemctl", "reset-failed", SERVICE)
     run("systemctl", "restart", "secure-model-api.service")
-
-    for attempt in range(60):
-        probe = subprocess.run(
-            ["docker", "inspect", "--format",
-             "{{if .State.Health}}{{.State.Health.Status}}{{end}}",
-             "secure-model-api"],
-            text=True, capture_output=True,
-        )
-        if probe.returncode == 0 and probe.stdout.strip() == "healthy":
-            break
-        time.sleep(2)
-    else:
-        raise RuntimeError("application did not become healthy within two minutes")
-
+    wait_for_health()
     run("bash", str(verifier), expected_image)
+    save_record("deployment-succeeded")
     print("PASS: deployment and runtime verification completed.", flush=True)
 
 except Exception as error:
     print(f"FAIL: deployment stopped: {error}", file=sys.stderr)
+    if mutation_started:
+        try:
+            print("ROLLBACK: restoring the verified previous deployment.", flush=True)
+            run("systemctl", "stop", SERVICE)
+            restore_file(snapshot / "launcher", LAUNCHER)
+            restore_file(snapshot / "service", UNIT)
+            require(file_hash(LAUNCHER) == record["launcher_sha256"],
+                    "restored launcher checksum")
+            require(file_hash(UNIT) == record["service_sha256"],
+                    "restored service checksum")
+            run("systemctl", "daemon-reload")
+            run("systemctl", "reset-failed", SERVICE)
+            run("systemctl", "start", SERVICE)
+            wait_for_health()
+            run("bash", str(snapshot / "verify-runtime.sh"), previous_image)
+            save_record("deployment-failed-rollback-succeeded")
+            print("PASS: previous deployment restored and verified.", flush=True)
+            print("FAIL: attempted deployment remains failed despite successful rollback.",
+                  file=sys.stderr)
+        except Exception as rollback_error:
+            print(f"CRITICAL: rollback failed: {rollback_error}", file=sys.stderr)
+            if snapshot is not None:
+                print("Recovery snapshot:", snapshot, file=sys.stderr)
+            raise SystemExit(2)
+    else:
+        print("Existing service configuration was not changed.", file=sys.stderr)
     raise SystemExit(1)
 PY

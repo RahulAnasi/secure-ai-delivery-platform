@@ -2,11 +2,21 @@
 # Package the approved development deployment and submit it through SSM.
 set -euo pipefail
 
+if [ "$#" -eq 0 ]; then
+    deployment_mode="deploy"
+elif [ "$#" -eq 1 ] && [ "$1" = "--simulate-start-failure" ]; then
+    deployment_mode="simulate-start-failure"
+    echo "TEST MODE: candidate startup will fail to exercise rollback."
+else
+    echo "Usage: $0 [--simulate-start-failure]" >&2
+    exit 64
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
-python3 - "$repo_root" "$work_dir/remote-deployment.sh" <<'PY'
+python3 - "$repo_root" "$work_dir/remote-deployment.sh" "$deployment_mode" <<'PY'
 import base64
 import io
 import tarfile
@@ -62,7 +72,9 @@ base64 --decode <<'DAY13_PACKAGE' |
 # Keep the pipeline on one line so Bash parses it correctly.
 remote = remote.rstrip() + ' tar -xz -C "$package_dir"\n'
 remote += encoded + "\nDAY13_PACKAGE\n"
-remote += '\nbash "$package_dir/deploy-on-host.sh" "$package_dir"\n'
+remote += '\nbash "$package_dir/deploy-on-host.sh" "$package_dir"'
+remote += " --simulate-start-failure" if sys.argv[3] == "simulate-start-failure" else ""
+remote += "\n"
 
 # Leave room for the command runner's surrounding Bash instructions.
 if len(remote.encode("utf-8")) > 24000:
